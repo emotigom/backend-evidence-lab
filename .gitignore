@@ -1,0 +1,21 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+out/
+
+### Eclipse / Spring Tool Suite ###
+.classpath
+.project
+.settings/
+.springBeans
+.sts4-cache/
+
+### VS Code ###
+.vscode/
+
+### Local environment files ###
+.env

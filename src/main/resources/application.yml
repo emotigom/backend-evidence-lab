@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: backend-evidence-lab
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/evidence_lab}
+    username: ${SPRING_DATASOURCE_USERNAME:evidence_lab}
+    password: ${SPRING_DATASOURCE_PASSWORD:evidence_lab}
+  flyway:
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always
