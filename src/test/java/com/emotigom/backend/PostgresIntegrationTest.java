@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
+import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,6 +19,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
+
+import com.emotigom.backend.event.Event;
+import com.emotigom.backend.event.EventRepository;
 
 @Testcontainers
 @SpringBootTest
@@ -32,6 +38,9 @@ class PostgresIntegrationTest {
 
 	@Autowired
 	JdbcTemplate jdbcTemplate;
+
+	@Autowired
+	EventRepository eventRepository;
 
 	@DynamicPropertySource
 	static void registerDataSourceProperties(DynamicPropertyRegistry registry) {
@@ -55,6 +64,44 @@ class PostgresIntegrationTest {
 		assertTrue(Boolean.TRUE.equals(jdbcTemplate.queryForObject(
 				"SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'evidence_lab')", Boolean.class)),
 				"the Flyway migration must create the evidence_lab schema");
+	}
+
+	@Test
+	void flywayMigrationCreatesEventsTableWithExpectedPostgresTypes() {
+		assertEquals("evidence_lab.events",
+				jdbcTemplate.queryForObject("SELECT to_regclass('evidence_lab.events')", String.class));
+		assertEquals("uuid", columnDataType("id"));
+		assertEquals("text", columnDataType("event_type"));
+		assertEquals("text", columnDataType("payload"));
+		assertEquals("timestamp with time zone", columnDataType("created_at"));
+	}
+
+	@Test
+	void insertedEventCanBeLoadedByIdWithValuesPreserved() {
+		Event event = new Event(
+				UUID.fromString("8d1f8e4a-3b2f-4ac8-9f22-2cf2d8f82a41"),
+				"account.created",
+				"{\"accountId\":\"acct-123\",\"active\":true}",
+				Instant.parse("2026-09-25T10:15:30Z"));
+
+		eventRepository.insert(event);
+
+		assertEquals(Optional.of(event), eventRepository.findById(event.id()));
+	}
+
+	@Test
+	void findingMissingEventReturnsEmptyOptional() {
+		assertTrue(eventRepository.findById(UUID.fromString("2f5e0f8a-6d2c-4c6b-8b2e-6f12f0b1a734")).isEmpty());
+	}
+
+	private String columnDataType(String columnName) {
+		return jdbcTemplate.queryForObject("""
+				SELECT data_type
+				FROM information_schema.columns
+				WHERE table_schema = 'evidence_lab'
+				  AND table_name = 'events'
+				  AND column_name = ?
+				""", String.class, columnName);
 	}
 
 }

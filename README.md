@@ -6,7 +6,7 @@ This repository is a small, evidence-driven laboratory for learning and demonstr
 problem -> test -> minimal implementation -> verification -> evidence
 ```
 
-TASK-001 bootstraps a Spring Boot application with a real PostgreSQL development database, Flyway migrations, a local Actuator health endpoint, and one PostgreSQL Testcontainer integration test. It deliberately contains no domain or webhook behavior.
+TASK-001 bootstraps a Spring Boot application with a real PostgreSQL development database, Flyway migrations, a local Actuator health endpoint, and one PostgreSQL Testcontainer integration test. TASK-002 adds the smallest SQL-visible event persistence path: insert an event and load it by ID. There is no HTTP API or webhook behavior.
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ Only the Actuator `health` endpoint is exposed over HTTP, with local health deta
 
 ## Verify
 
-The integration test starts a real PostgreSQL `16-alpine` Testcontainer and overrides the application datasource with the container's JDBC connection. It checks the active Spring context, PostgreSQL JDBC metadata, the container database name, the Flyway history table, and the migrated schema.
+The integration test starts a real PostgreSQL `16-alpine` Testcontainer and overrides the application datasource with the container's JDBC connection. It checks the active Spring context, PostgreSQL JDBC metadata, the container database name, the Flyway history table, the `events` table and column types, an event insert/read round trip, and explicit missing-ID behavior.
 
 ```powershell
 .\gradlew.bat test
