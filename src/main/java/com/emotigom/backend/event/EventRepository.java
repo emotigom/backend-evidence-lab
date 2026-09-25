@@ -13,12 +13,12 @@ import org.springframework.stereotype.Repository;
 public class EventRepository {
 
 	private static final String INSERT_SQL = """
-			INSERT INTO evidence_lab.events (id, event_type, payload, created_at)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO evidence_lab.events (id, event_type, payload, created_at, idempotency_key)
+			VALUES (?, ?, ?, ?, ?)
 			""";
 
 	private static final String FIND_BY_ID_SQL = """
-			SELECT id, event_type, payload, created_at
+			SELECT id, event_type, payload, created_at, idempotency_key
 			FROM evidence_lab.events
 			WHERE id = ?
 			""";
@@ -27,7 +27,8 @@ public class EventRepository {
 			resultSet.getObject("id", UUID.class),
 			resultSet.getString("event_type"),
 			resultSet.getString("payload"),
-			resultSet.getObject("created_at", OffsetDateTime.class).toInstant());
+			resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+			resultSet.getString("idempotency_key"));
 
 	private final JdbcTemplate jdbcTemplate;
 
@@ -41,7 +42,8 @@ public class EventRepository {
 				event.id(),
 				event.eventType(),
 				event.payload(),
-				OffsetDateTime.ofInstant(event.createdAt(), ZoneOffset.UTC));
+				OffsetDateTime.ofInstant(event.createdAt(), ZoneOffset.UTC),
+				event.idempotencyKey());
 	}
 
 	public Optional<Event> findById(UUID id) {

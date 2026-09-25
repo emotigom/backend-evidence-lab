@@ -6,7 +6,7 @@ This repository is a small, evidence-driven laboratory for learning and demonstr
 problem -> test -> minimal implementation -> verification -> evidence
 ```
 
-TASK-001 bootstraps a Spring Boot application with a real PostgreSQL development database, Flyway migrations, a local Actuator health endpoint, and one PostgreSQL Testcontainer integration test. TASK-002 adds the smallest SQL-visible event persistence path: insert an event and load it by ID. There is no HTTP API or webhook behavior.
+TASK-001 bootstraps a Spring Boot application with a real PostgreSQL development database, Flyway migrations, a local Actuator health endpoint, and one PostgreSQL Testcontainer integration test. TASK-002 adds the smallest SQL-visible event persistence path: insert an event and load it by ID. TASK-003 adds a caller-supplied idempotency key with sequential duplicate enforcement in PostgreSQL. There is no HTTP API or webhook behavior.
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ Only the Actuator `health` endpoint is exposed over HTTP, with local health deta
 
 ## Verify
 
-The integration test starts a real PostgreSQL `16-alpine` Testcontainer and overrides the application datasource with the container's JDBC connection. It checks the active Spring context, PostgreSQL JDBC metadata, the container database name, the Flyway history table, the `events` table and column types, an event insert/read round trip, and explicit missing-ID behavior.
+The integration test starts a real PostgreSQL `16-alpine` Testcontainer and overrides the application datasource with the container's JDBC connection. It checks the active Spring context, PostgreSQL JDBC metadata, the container database name, the Flyway history table, the `events` table and column types, the unique idempotency constraint, insert/read and duplicate behavior, and explicit missing-ID behavior.
 
 ```powershell
 .\gradlew.bat test
@@ -64,4 +64,4 @@ docker compose config
 docker compose exec -T postgres pg_isready -U evidence_lab -d evidence_lab
 ```
 
-The reproducible record for TASK-001 is in [evidence/TASK-001.md](evidence/TASK-001.md). The current design is described in [docs/architecture.md](docs/architecture.md), and the database decision is recorded in [adr/0001-start-with-postgres.md](adr/0001-start-with-postgres.md).
+The reproducible records for TASK-001, TASK-002, and TASK-003 are in [evidence/](evidence/). The current design is described in [docs/architecture.md](docs/architecture.md), and the database decision is recorded in [adr/0001-start-with-postgres.md](adr/0001-start-with-postgres.md).
