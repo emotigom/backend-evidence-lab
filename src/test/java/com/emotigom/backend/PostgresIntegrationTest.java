@@ -1,15 +1,23 @@
 package com.emotigom.backend;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -188,6 +196,93 @@ class PostgresIntegrationTest {
 	}
 
 	@Test
+	void concurrentDuplicateInsertsPreserveDatabaseInvariant() throws Exception {
+		Event first = new Event(
+				UUID.fromString("105e4c62-0f55-4f7a-8c09-000000000401"),
+				"task-004.concurrent.first",
+				"{\"worker\":\"first\"}",
+				Instant.parse("2026-09-25T14:00:00Z"),
+				"task-004-experiment-a");
+		Event second = new Event(
+				UUID.fromString("205e4c62-0f55-4f7a-8c09-000000000402"),
+				"task-004.concurrent.second",
+				"{\"worker\":\"second\"}",
+				Instant.parse("2026-09-25T14:00:01Z"),
+				first.idempotencyKey());
+
+		RaceResult result = runConcurrentInsertRace(first, second);
+
+		assertOneSuccessAndOneDuplicate(result);
+		Event winner = assertOnePersistedWinner(first, second);
+		System.out.println("TASK-004 Experiment A: first=" + result.firstAttempt()
+				+ ", second=" + result.secondAttempt() + ", winner=" + winner.id());
+	}
+
+	@Test
+	void checkThenInsertRaceExposesDatabaseIntegrityBoundary() throws Exception {
+		Event first = new Event(
+				UUID.fromString("305e4c62-0f55-4f7a-8c09-000000000403"),
+				"task-004.check.first",
+				"{\"worker\":\"first-check\"}",
+				Instant.parse("2026-09-25T15:00:00Z"),
+				"task-004-experiment-b");
+		Event second = new Event(
+				UUID.fromString("405e4c62-0f55-4f7a-8c09-000000000404"),
+				"task-004.check.second",
+				"{\"worker\":\"second-check\"}",
+				Instant.parse("2026-09-25T15:00:01Z"),
+				first.idempotencyKey());
+
+		CheckThenInsertRaceResult result = runCheckThenInsertRace(first, second);
+
+		assertFalse(result.firstObservedPresent());
+		assertFalse(result.secondObservedPresent());
+		assertOneSuccessAndOneDuplicate(new RaceResult(result.firstAttempt(), result.secondAttempt()));
+		Event winner = assertOnePersistedWinner(first, second);
+		System.out.println("TASK-004 Experiment B: firstObservedPresent=" + result.firstObservedPresent()
+				+ ", secondObservedPresent=" + result.secondObservedPresent()
+				+ ", first=" + result.firstAttempt() + ", second=" + result.secondAttempt()
+				+ ", winner=" + winner.id());
+	}
+
+	@Test
+	void repeatedConcurrentDuplicateInsertsPreserveDatabaseInvariant() throws Exception {
+		int firstWins = 0;
+		int secondWins = 0;
+
+		for (int iteration = 1; iteration <= 10; iteration++) {
+			String key = "task-004-repeat-" + iteration + "-" + UUID.randomUUID();
+			Event first = new Event(
+					UUID.randomUUID(),
+					"task-004.repeat.first",
+					"{\"iteration\":" + iteration + ",\"worker\":\"first\"}",
+					Instant.parse("2026-09-25T16:00:00Z").plusSeconds(iteration),
+					key);
+			Event second = new Event(
+					UUID.randomUUID(),
+					"task-004.repeat.second",
+					"{\"iteration\":" + iteration + ",\"worker\":\"second\"}",
+					Instant.parse("2026-09-25T16:00:01Z").plusSeconds(iteration),
+					key);
+
+			RaceResult result = runConcurrentInsertRace(first, second);
+
+			assertOneSuccessAndOneDuplicate(result);
+			Event winner = assertOnePersistedWinner(first, second);
+			if (winner.id().equals(first.id())) {
+				firstWins++;
+			} else if (winner.id().equals(second.id())) {
+				secondWins++;
+			} else {
+				throw new AssertionError("winner must be one of the submitted events");
+			}
+		}
+
+		System.out.println("TASK-004 repeat summary: iterations=10, firstWins=" + firstWins
+				+ ", secondWins=" + secondWins);
+	}
+
+	@Test
 	void findingMissingEventReturnsEmptyOptional() {
 		assertTrue(eventRepository.findById(UUID.fromString("2f5e0f8a-6d2c-4c6b-8b2e-6f12f0b1a734")).isEmpty());
 	}
@@ -210,6 +305,169 @@ class PostgresIntegrationTest {
 				  AND table_name = 'events'
 				  AND column_name = ?
 				""", String.class, columnName);
+	}
+
+	private RaceResult runConcurrentInsertRace(Event first, Event second) throws Exception {
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+		CountDownLatch workersReady = new CountDownLatch(2);
+		CountDownLatch releaseWorkers = new CountDownLatch(1);
+
+		try {
+			Future<AttemptResult> firstFuture = executor.submit(
+					() -> awaitAndInsert(first, workersReady, releaseWorkers));
+			Future<AttemptResult> secondFuture = executor.submit(
+					() -> awaitAndInsert(second, workersReady, releaseWorkers));
+
+			assertTrue(workersReady.await(10, TimeUnit.SECONDS), "both insert workers must be ready");
+			releaseWorkers.countDown();
+			return new RaceResult(firstFuture.get(10, TimeUnit.SECONDS), secondFuture.get(10, TimeUnit.SECONDS));
+		} finally {
+			stopExecutor(executor);
+		}
+	}
+
+	private CheckThenInsertRaceResult runCheckThenInsertRace(Event first, Event second) throws Exception {
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+		CountDownLatch checksComplete = new CountDownLatch(2);
+		CountDownLatch releaseInserts = new CountDownLatch(1);
+
+		try {
+			Future<CheckThenInsertResult> firstFuture = executor.submit(
+					() -> checkThenAwaitAndInsert(first, checksComplete, releaseInserts));
+			Future<CheckThenInsertResult> secondFuture = executor.submit(
+					() -> checkThenAwaitAndInsert(second, checksComplete, releaseInserts));
+
+			assertTrue(checksComplete.await(10, TimeUnit.SECONDS), "both existence checks must complete");
+			releaseInserts.countDown();
+			CheckThenInsertResult firstResult = firstFuture.get(10, TimeUnit.SECONDS);
+			CheckThenInsertResult secondResult = secondFuture.get(10, TimeUnit.SECONDS);
+			return new CheckThenInsertRaceResult(
+					firstResult.observedPresent(),
+					secondResult.observedPresent(),
+					firstResult.attempt(),
+					secondResult.attempt());
+		} finally {
+			stopExecutor(executor);
+		}
+	}
+
+	private AttemptResult awaitAndInsert(
+			Event event,
+			CountDownLatch workersReady,
+			CountDownLatch releaseWorkers) throws InterruptedException {
+		workersReady.countDown();
+		if (!releaseWorkers.await(10, TimeUnit.SECONDS)) {
+			throw new AssertionError("insert workers were not released");
+		}
+		return attemptInsert(event);
+	}
+
+	private CheckThenInsertResult checkThenAwaitAndInsert(
+			Event event,
+			CountDownLatch checksComplete,
+			CountDownLatch releaseInserts) throws InterruptedException {
+		boolean observedPresent = idempotencyKeyExists(event.idempotencyKey());
+		checksComplete.countDown();
+		if (!releaseInserts.await(10, TimeUnit.SECONDS)) {
+			throw new AssertionError("check-then-insert workers were not released");
+		}
+		return new CheckThenInsertResult(observedPresent, attemptInsert(event));
+	}
+
+	private boolean idempotencyKeyExists(String idempotencyKey) {
+		return Boolean.TRUE.equals(jdbcTemplate.queryForObject(
+				"SELECT EXISTS (SELECT 1 FROM evidence_lab.events WHERE idempotency_key = ?)",
+				Boolean.class,
+				idempotencyKey));
+	}
+
+	private AttemptResult attemptInsert(Event event) {
+		try {
+			eventRepository.insert(event);
+			return new AttemptResult(event.id(), true, null, null, null);
+		} catch (RuntimeException failure) {
+			return new AttemptResult(
+					event.id(),
+					false,
+					failure.getClass().getSimpleName(),
+					rootCause(failure).getClass().getSimpleName(),
+					sqlState(failure));
+		}
+	}
+
+	private void assertOneSuccessAndOneDuplicate(RaceResult result) {
+		List<AttemptResult> attempts = List.of(result.firstAttempt(), result.secondAttempt());
+		assertEquals(1L, attempts.stream().filter(AttemptResult::succeeded).count());
+		AttemptResult duplicate = attempts.stream()
+				.filter(attempt -> !attempt.succeeded())
+				.findFirst()
+				.orElseThrow();
+		assertEquals("DuplicateKeyException", duplicate.exceptionType());
+		assertEquals("PSQLException", duplicate.rootCauseType());
+		assertEquals("23505", duplicate.sqlState());
+	}
+
+	private Event assertOnePersistedWinner(Event first, Event second) {
+		assertEquals(1, jdbcTemplate.queryForObject(
+				"SELECT count(*) FROM evidence_lab.events WHERE idempotency_key = ?",
+				Integer.class,
+				first.idempotencyKey()));
+
+		Optional<Event> firstLoaded = eventRepository.findById(first.id());
+		Optional<Event> secondLoaded = eventRepository.findById(second.id());
+		assertTrue(firstLoaded.isPresent() ^ secondLoaded.isPresent(),
+				"exactly one submitted event must be persisted");
+		Event winner = firstLoaded.orElseGet(() -> secondLoaded.orElseThrow());
+		assertTrue(winner.equals(first) || winner.equals(second),
+				"the persisted event must be one of the submitted events");
+		return winner;
+	}
+
+	private Throwable rootCause(Throwable failure) {
+		Throwable current = failure;
+		while (current.getCause() != null && current.getCause() != current) {
+			current = current.getCause();
+		}
+		return current;
+	}
+
+	private String sqlState(Throwable failure) {
+		Throwable current = failure;
+		while (current != null) {
+			if (current instanceof SQLException sqlException) {
+				return sqlException.getSQLState();
+			}
+			current = current.getCause();
+		}
+		return null;
+	}
+
+	private void stopExecutor(ExecutorService executor) throws InterruptedException {
+		executor.shutdownNow();
+		if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+			throw new AssertionError("worker executor did not terminate");
+		}
+	}
+
+	private record AttemptResult(
+			UUID eventId,
+			boolean succeeded,
+			String exceptionType,
+			String rootCauseType,
+			String sqlState) {
+	}
+
+	private record RaceResult(AttemptResult firstAttempt, AttemptResult secondAttempt) {
+	}
+
+	private record CheckThenInsertResult(boolean observedPresent, AttemptResult attempt) {
+	}
+
+	private record CheckThenInsertRaceResult(
+			boolean firstObservedPresent,
+			boolean secondObservedPresent,
+			AttemptResult firstAttempt,
+			AttemptResult secondAttempt) {
 	}
 
 }
